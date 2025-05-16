@@ -3,14 +3,61 @@ const { v4: uuidv4 } = require('uuid');
 
 // FakeYou API endpoints
 const FAKEYOU_BASE_URL = 'https://api.fakeyou.com';
+const FAKEYOU_LOGIN_URL = `${FAKEYOU_BASE_URL}/login`;
 const FAKEYOU_TTS_URL = `${FAKEYOU_BASE_URL}/tts/inference`;
 const FAKEYOU_JOB_URL = `${FAKEYOU_BASE_URL}/tts/job`;
 
-// Replace this with your actual FakeYou auth token
-const FAKEYOU_AUTH_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uX3Rva2VuIjoic2Vzc2lvbl85OHA5c2ZodDRiMWRnYmplc216ejV5NWoiLCJ1c2VyX3Rva2VuIjoidXNlcl8xenJxZnpzYjRzMHkxIiwidmVyc2lvbiI6IjMifQ.-uglpvWlKg7XzEP_-diG5cdU0poKX8y2NV-q_qrW_LI';
+// Replace these with your actual FakeYou credentials
+const FAKEYOU_USERNAME = 'YOUR_FAKEYOU_USERNAME';
+const FAKEYOU_PASSWORD = 'YOUR_FAKEYOU_PASSWORD';
+
+// Store the session cookie
+let sessionCookie = null;
+
+async function login() {
+    try {
+        console.log('Logging in to FakeYou...');
+        
+        // Prepare the login payload
+        const payload = {
+            username_or_email: FAKEYOU_USERNAME,
+            password: FAKEYOU_PASSWORD
+        };
+
+        // Make the login API call
+        const response = await axios.post(FAKEYOU_LOGIN_URL, payload, {
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            withCredentials: true
+        });
+
+        // Extract and store the session cookie
+        if (response.headers['set-cookie']) {
+            sessionCookie = response.headers['set-cookie'];
+            console.log('Login successful! Session cookie obtained.');
+            return true;
+        } else {
+            console.error('Failed to obtain session cookie');
+            return false;
+        }
+    } catch (error) {
+        console.error('Login Error:', error.response ? error.response.data : error.message);
+        return false;
+    }
+}
 
 async function testConvertTextToSpeech() {
     try {
+        // Make sure we're logged in
+        if (!sessionCookie) {
+            const loginSuccess = await login();
+            if (!loginSuccess) {
+                console.error('Cannot proceed without login');
+                return;
+            }
+        }
+
         // Test data
         const testData = {
             text: "Hello, this is a test message",
@@ -29,9 +76,10 @@ async function testConvertTextToSpeech() {
         // Make the API call
         const response = await axios.post(FAKEYOU_TTS_URL, payload, {
             headers: {
-                'Authorization': `Bearer ${FAKEYOU_AUTH_TOKEN}`,
-                'Content-Type': 'application/json'
-            }
+                'Content-Type': 'application/json',
+                'Cookie': sessionCookie
+            },
+            withCredentials: true
         });
 
         console.log('Response:', response.data);
@@ -57,8 +105,9 @@ async function pollUntilComplete(inferenceToken) {
             console.log('\nChecking conversion status...');
             const response = await axios.get(`${FAKEYOU_JOB_URL}/${inferenceToken}`, {
                 headers: {
-                    'Authorization': `Bearer ${FAKEYOU_AUTH_TOKEN}`
-                }
+                    'Cookie': sessionCookie
+                },
+                withCredentials: true
             });
             const data = response.data;
             console.log('Status Response:', data);
