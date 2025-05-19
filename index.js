@@ -1,240 +1,328 @@
 /**
- * Firebase Cloud Functions for FakeYou.js Text-to-Speech Integration
+ * FakeYou TTS API Wrapper
  * 
- * This module provides three callable functions:
- * 1. loginFakeYou: Authenticates with FakeYou using username and password
- * 2. convertTextToSpeech: Starts a TTS job on FakeYou and returns a job token.
- * 3. checkConversionStatus: Checks the status of a TTS job and returns the audio URL when ready.
+ * Handles text-to-speech generation using the FakeYou API
+ * Fixed to work with the new CDN URL (Nov 2024 change)
  * 
- * Features:
- * - Uses UUID for idempotency.
- * - Authenticates with FakeYou using account credentials
- * - Robust error handling and clear responses.
- * 
- * Author: [Your Name/Company]
- * Date: [YYYY-MM-DD]
+ * @author Bernie
+ * @version 1.2.1
  */
 
-const functions = require("firebase-functions");
-const admin = require("firebase-admin");
-const axios = require("axios");
-const { v4: uuidv4 } = require("uuid");
+const FakeYou = require("fakeyou.ts").default;
+const fs = require("fs");
+const https = require("https");
+const path = require("path");
 
-admin.initializeApp();
+// FakeYou updated their CDN URL in November 2024
+const CDN_URL = "https://cdn-2.fakeyou.com";
 
-// --- Constants ---
-const FAKEYOU_BASE_URL = "https://api.fakeyou.com";
-const FAKEYOU_LOGIN_URL = `${FAKEYOU_BASE_URL}/login`;
-const FAKEYOU_TTS_URL = `${FAKEYOU_BASE_URL}/tts/inference`;
-const FAKEYOU_JOB_URL = `${FAKEYOU_BASE_URL}/tts/job`;
+// Keep track of login status
+let loggedIn = false;
 
-// Store session data
-let sessionCookie = null;
-
-/**
- * Callable function: loginFakeYou
- * 
- * Authenticates with FakeYou using username and password.
- * 
- * @param {Object} data - The request data.
- * @param {string} data.username - FakeYou account username/email.
- * @param {string} data.password - FakeYou account password.
- * @returns {Object} - { success, message }
- */
-exports.loginFakeYou = functions.https.onCall(async (data, context) => {
-  try {
-    // Validate input
-    if (!data.username || !data.password) {
-      throw new functions.https.HttpsError(
-        "invalid-argument",
-        "Username and password are required"
-      );
-    }
-
-    // Prepare the login payload
-    const payload = {
-      username_or_email: data.username,
-      password: data.password
-    };
-
-    // Make the login API call to FakeYou
-    const response = await axios.post(FAKEYOU_LOGIN_URL, payload, {
-      headers: {
-        "Content-Type": "application/json"
-      },
-      withCredentials: true
-    });
-
-    // Extract and store the session cookie
-    if (response.headers['set-cookie']) {
-      sessionCookie = response.headers['set-cookie'];
+// Helper for downloading files - we need this since their API doesn't 
+// always handle the downloads correctly
+function downloadAudioFile(url, savePath) {
+  // Create dirs if they don't exist
+  const dir = path.dirname(savePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(savePath);
+    
+    https.get(url, (response) => {
+      // Handle redirects if needed
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        downloadAudioFile(response.headers.location, savePath)
+          .then(resolve)
+          .catch(reject);
+        return;
+      }
       
-      // Store credentials in Firestore for persistence across function instances
-      await admin.firestore().collection('fakeyou').doc('session').set({
-        cookie: sessionCookie,
-        timestamp: admin.firestore.FieldValue.serverTimestamp()
+      response.pipe(file);
+      
+      file.on("finish", () => {
+        file.close();
+        resolve(true);
       });
       
-      return {
-        success: true,
-        message: "Login successful"
-      };
-    } else {
-      throw new functions.https.HttpsError(
-        "internal",
-        "Failed to obtain session from FakeYou"
-      );
-    }
-  } catch (error) {
-    // Log and rethrow as Firebase error
-    console.error("Error in loginFakeYou:", error);
-    throw new functions.https.HttpsError(
-      "internal",
-      error.message || "Unknown error"
-    );
-  }
-});
-
-/**
- * Get session cookie from Firestore if not already in memory
- * @returns {Promise<string>} The session cookie
- */
-async function getSessionCookie() {
-  // If we have a session in memory, use it
-  if (sessionCookie) {
-    return sessionCookie;
-  }
-  
-  // Try to retrieve from Firestore
-  const sessionDoc = await admin.firestore().collection('fakeyou').doc('session').get();
-  
-  if (sessionDoc.exists) {
-    sessionCookie = sessionDoc.data().cookie;
-    return sessionCookie;
-  }
-  
-  throw new Error("No active session found. Please login first.");
+      response.on("error", (err) => {
+        fs.unlink(savePath, () => {}); // Clean up failed file
+        reject(err);
+      });
+    }).on("error", (err) => {
+      fs.unlink(savePath, () => {}); // Clean up failed file
+      reject(err);
+    });
+  });
 }
 
 /**
- * Callable function: convertTextToSpeech
- * 
- * Starts a new TTS job on FakeYou.
- * 
- * @param {Object} data - The request data.
- * @param {string} data.text - The text to convert to speech.
- * @param {string} data.modelName - The FakeYou model token (voice) to use.
- * @returns {Object} - { success, inferenceToken, status }
+ * Main FakeYou TTS class
  */
-exports.convertTextToSpeech = functions.https.onCall(async (data, context) => {
-  try {
-    // Validate input
-    if (!data.text || !data.modelName) {
-      throw new functions.https.HttpsError(
-        "invalid-argument",
-        "Text and model name are required"
-      );
-    }
-
-    // Get session cookie
-    const cookie = await getSessionCookie();
+class FakeYouTTS {
+  constructor(opts = {}) {
+    this.client = new FakeYou();
+    this.username = opts.username || null;
+    this.password = opts.password || null;
+    this.loggedIn = false;
+    this.lastError = null;
     
-    // Prepare the request payload with a unique UUID for idempotency
-    const payload = {
-      tts_model_token: data.modelName,
-      inference_text: data.text,
-      uuid_idempotency_token: uuidv4(),
+    // Default options
+    this.options = {
+      retries: opts.retries || 3,
+      retryDelay: opts.retryDelay || 1000,
+      timeout: opts.timeout || 30000,
+      cacheDir: opts.cacheDir || "./cache",
     };
-
-    // Make the API call to FakeYou
-    const response = await axios.post(FAKEYOU_TTS_URL, payload, {
-      headers: {
-        "Content-Type": "application/json",
-        "Cookie": cookie
-      },
-      withCredentials: true
-    });
-
-    // Handle FakeYou response
-    if (response.data.success) {
-      return {
-        success: true,
-        inferenceToken: response.data.inference_job_token,
-        status: "processing",
-      };
-    } else {
-      throw new functions.https.HttpsError(
-        "internal",
-        "Failed to initiate text-to-speech conversion"
-      );
+    
+    // Track models we've already fetched to avoid duplicate API calls
+    this._modelCache = {};
+    
+    // Try to login on init if credentials provided
+    if (this.username && this.password) {
+      // Do login async - don't wait for it
+      this.login().catch(e => {
+        console.warn("Auto-login failed:", e.message);
+      });
     }
-  } catch (error) {
-    // Log and rethrow as Firebase error
-    console.error("Error in convertTextToSpeech:", error);
-    throw new functions.https.HttpsError(
-      "internal",
-      error.message || "Unknown error"
-    );
   }
-});
-
-/**
- * Callable function: checkConversionStatus
- * 
- * Checks the status of a TTS job and returns the audio URL when ready.
- * 
- * @param {Object} data - The request data.
- * @param {string} data.inferenceToken - The job token returned by convertTextToSpeech.
- * @returns {Object} - { success, status, audioUrl }
- */
-exports.checkConversionStatus = functions.https.onCall(
-  async (data, context) => {
+  
+  /**
+   * Log in to FakeYou
+   */
+  async login(username = null, password = null) {
+    // Use provided credentials or fall back to constructor values
+    const user = username || this.username;
+    const pass = password || this.password;
+    
+    if (!user || !pass) {
+      throw new Error("No credentials provided for login");
+    }
+    
     try {
-      // Validate input
-      if (!data.inferenceToken) {
-        throw new functions.https.HttpsError(
-          "invalid-argument",
-          "Inference token is required"
-        );
-      }
-
-      // Get session cookie
-      const cookie = await getSessionCookie();
-
-      // Make the API call to check job status
-      const response = await axios.get(
-        `${FAKEYOU_JOB_URL}/${data.inferenceToken}`,
-        {
-          headers: {
-            "Cookie": cookie
-          },
-          withCredentials: true
-        }
-      );
-
-      // Handle FakeYou response
-      if (response.data.success) {
-        const status = response.data.state.status;
-        const audioUrl = response.data.state.maybe_public_bucket_wav_audio_path || null;
-
-        return {
-          success: true,
-          status: status,
-          audioUrl: audioUrl,
-        };
-      } else {
-        throw new functions.https.HttpsError(
-          "internal",
-          "Failed to check conversion status"
-        );
-      }
-    } catch (error) {
-      // Log and rethrow as Firebase error
-      console.error("Error in checkConversionStatus:", error);
-      throw new functions.https.HttpsError(
-        "internal",
-        error.message || "Unknown error"
-      );
+      await this.client.login({
+        username: user,
+        password: pass
+      });
+      
+      this.loggedIn = true;
+      this.lastError = null;
+      return true;
+    } catch (err) {
+      this.lastError = err;
+      this.loggedIn = false;
+      // Re-throw with better message
+      throw new Error(`FakeYou login failed: ${err.message}`);
     }
   }
-);
+  
+  /**
+   * Find voice models by search term
+   */
+  async findModels(searchTerm) {
+    // Try to use cached results first
+    const cacheKey = `search_${searchTerm}`;
+    if (this._modelCache[cacheKey]) {
+      return this._modelCache[cacheKey];
+    }
+    
+    try {
+      // Handle empty search specially - fakeyou.ts behaves weird with empty searches
+      if (!searchTerm || searchTerm.trim() === '') {
+        searchTerm = 'a'; // Just search for something common
+      }
+      
+      const modelsMap = await this.client.fetchTtsModels(searchTerm);
+      
+      if (!modelsMap) {
+        throw new Error("No models returned from API");
+      }
+      
+      // Convert Map to Array for easier use
+      const models = Array.from(modelsMap.values());
+      
+      // Cache this search result
+      this._modelCache[cacheKey] = models;
+      
+      return models;
+    } catch (err) {
+      console.error(`Error finding models for "${searchTerm}":`, err);
+      return [];
+    }
+  }
+  
+  /**
+   * Get a model by its exact token
+   */
+  async getModel(modelToken) {
+    // Check cache first
+    if (this._modelCache[modelToken]) {
+      return this._modelCache[modelToken];
+    }
+    
+    try {
+      // TODO: This is inefficient but the API doesn't have a direct "get by ID" endpoint
+      //       Look into a better way to do this in the future
+      const models = await this.findModels("");
+      const model = models.find(m => m.token === modelToken);
+      
+      if (model) {
+        // Cache for future use
+        this._modelCache[modelToken] = model;
+      }
+      
+      return model || null;
+    } catch (err) {
+      console.error(`Failed to get model ${modelToken}:`, err);
+      return null;
+    }
+  }
+  
+  /**
+   * Find a model by name (partial match)
+   * Returns the best matching model or null if none found
+   */
+  async findModelByName(name) {
+    try {
+      // Check if we're logged in
+      if (!this.loggedIn && this.username && this.password) {
+        await this.login();
+      }
+      
+      const models = await this.findModels(name);
+      
+      if (!models || models.length === 0) {
+        return null;
+      }
+      
+      // Try to match by name (case insensitive)
+      const nameLower = name.toLowerCase();
+      
+      // Try exact match first
+      let match = models.find(m => 
+        m.title && m.title.toLowerCase() === nameLower
+      );
+      
+      // If no exact match, try includes
+      if (!match) {
+        match = models.find(m => 
+          m.title && m.title.toLowerCase().includes(nameLower)
+        );
+      }
+      
+      // If still no match, just use the first result
+      if (!match && models.length > 0) {
+        match = models[0];
+      }
+      
+      return match;
+    } catch (err) {
+      console.error(`Error finding model by name "${name}":`, err);
+      return null;
+    }
+  }
+  
+  /**
+   * Generate TTS from text
+   */
+  async generateTTS(model, text) {
+    if (!model) {
+      throw new Error("No model provided for TTS generation");
+    }
+    
+    if (!text || text.trim() === '') {
+      throw new Error("No text provided for TTS generation");
+    }
+    
+    let retries = this.options.retries;
+    
+    while (retries >= 0) {
+      try {
+        const result = await model.infer(text);
+        return result;
+      } catch (err) {
+        retries--;
+        
+        // If we're out of retries, throw the error
+        if (retries < 0) {
+          throw new Error(`TTS generation failed after ${this.options.retries} attempts: ${err.message}`);
+        }
+        
+        // Wait before retrying
+        await new Promise(r => setTimeout(r, this.options.retryDelay));
+      }
+    }
+  }
+  
+  /**
+   * Get the CDN URL for a TTS result
+   */
+  getAudioUrl(inference) {
+    if (!inference) return null;
+    
+    // Get the path from the inference result
+    if (inference.publicBucketWavAudioPath) {
+      // Use the new CDN URL with the path
+      return `${CDN_URL}${inference.publicBucketWavAudioPath}`;
+    }
+    
+    // Fall back to resourceUrl if available
+    if (inference.resourceUrl) {
+      // Check if resourceUrl uses the old CDN
+      if (inference.resourceUrl.includes('storage.googleapis.com')) {
+        // Extract path and use new CDN
+        const pathMatch = inference.resourceUrl.match(/\/media\/.*\.wav$/);
+        if (pathMatch) {
+          return `${CDN_URL}${pathMatch[0]}`;
+        }
+      }
+      return inference.resourceUrl;
+    }
+    
+    // We couldn't find a valid URL
+    return null;
+  }
+  
+  /**
+   * Download a TTS result to a file
+   */
+  async downloadTTS(inference, outputPath) {
+    const url = this.getAudioUrl(inference);
+    
+    if (!url) {
+      throw new Error("Could not determine audio URL");
+    }
+    
+    try {
+      await downloadAudioFile(url, outputPath);
+      return outputPath;
+    } catch (err) {
+      throw new Error(`Failed to download audio: ${err.message}`);
+    }
+  }
+  
+  /**
+   * Shortcut method to generate and download TTS in one go
+   */
+  async sayToFile(modelNameOrToken, text, outputPath) {
+    let model;
+    
+    // Check if it's a model token or name
+    if (modelNameOrToken.startsWith('weight_')) {
+      model = await this.getModel(modelNameOrToken);
+    } else {
+      model = await this.findModelByName(modelNameOrToken);
+    }
+    
+    if (!model) {
+      throw new Error(`Could not find model: ${modelNameOrToken}`);
+    }
+    
+    const inference = await this.generateTTS(model, text);
+    return await this.downloadTTS(inference, outputPath);
+  }
+}
+
+module.exports = FakeYouTTS;
