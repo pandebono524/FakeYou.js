@@ -1,277 +1,232 @@
-# FakeYou.js Text-to-Speech Firebase Cloud Functions
+# FakeYou.js Text-to-Speech API Wrapper
 
-This project provides Firebase Cloud Functions that integrate with the [FakeYou.js](https://fakeyou.com/) API to deliver text-to-speech (TTS) capabilities for your app. The functions are designed for secure, scalable, and asynchronous TTS job handling, suitable for use with React Native, Node.js, or any client that can call Firebase Functions.
-
----
+A Node.js wrapper for the FakeYou Text-to-Speech API that simplifies voice generation and handles the new CDN URL changes from November 2024.
 
 ## Features
 
-- **Authentication:** Login with your FakeYou account credentials.
-- **Start TTS Jobs:** Initiate a text-to-speech job with any supported FakeYou voice model.
-- **Check Job Status:** Poll for job completion and retrieve the generated audio URL.
-- **Idempotency:** Each TTS request uses a unique UUID to prevent duplicate jobs.
-- **Secure:** Credentials are processed securely and session is maintained.
-- **Robust Error Handling:** Clear error messages for all failure scenarios.
+- **Simple API**: Easy-to-use methods for finding voice models and generating speech
+- **CDN Support**: Automatically handles FakeYou's new CDN URLs
+- **Retries**: Built-in retry mechanism for handling API failures
+- **Caching**: Stores models to reduce API calls
+- **Download Support**: Easy file saving with proper error handling
+- **Authentication**: Simple login process
 
----
+## Installation
 
-## Setup Instructions
+```bash
+npm install fakeyou.ts fs https path
+```
 
-1. **Install Firebase CLI:**
-   ```bash
-   npm install -g firebase-tools
-   ```
+## Quick Start
 
-2. **Login to Firebase:**
-   ```bash
-   firebase login
-   ```
-
-3. **Initialize Firebase Functions (if not already):**
-   ```bash
-   firebase init functions
-   ```
-
-4. **Install dependencies:**
-   ```bash
-   cd functions
-   npm install
-   ```
-
-5. **Deploy the functions:**
-   ```bash
-   firebase deploy --only functions
-   ```
-
----
-
-## API Overview
-
-### 1. `loginFakeYou`
-
-**Description:**  
-Authenticates with FakeYou using username and password.
-
-**Parameters:**
-- `username` (string): Your FakeYou account username or email.
-- `password` (string): Your FakeYou account password.
-
-**Returns:**
-- `success` (boolean)
-- `message` (string): Confirmation message.
-
-**Example (Client-side):**
 ```javascript
-const loginFakeYou = firebase.functions().httpsCallable('loginFakeYou');
-const result = await loginFakeYou({
-    username: "your_fakeyou_email@example.com",
+const FakeYouTTS = require('./index.js');
+
+async function quickDemo() {
+  // Create a client
+  const tts = new FakeYouTTS({
+    username: "your_username",
     password: "your_password"
-});
-// result.data: { success: true, message: "Login successful" }
-```
-
-### 2. `convertTextToSpeech`
-
-**Description:**  
-Starts a new TTS job on FakeYou. Requires prior authentication via `loginFakeYou`.
-
-**Parameters:**
-- `text` (string): The text to convert to speech.
-- `modelName` (string): The FakeYou model token (voice) to use.
-
-**Returns:**
-- `success` (boolean)
-- `inferenceToken` (string): Use this to check job status.
-- `status` (string): Usually `"processing"`.
-
-**Example (Client-side):**
-```javascript
-const convertTextToSpeech = firebase.functions().httpsCallable('convertTextToSpeech');
-const result = await convertTextToSpeech({
-    text: "Hello, this is a test",
-    modelName: "YOUR_MODEL_TOKEN"
-});
-// result.data: { success: true, inferenceToken: "...", status: "processing" }
-```
-
----
-
-### 3. `checkConversionStatus`
-
-**Description:**  
-Checks the status of a TTS job and returns the audio URL when ready. Requires prior authentication via `loginFakeYou`.
-
-**Parameters:**
-- `inferenceToken` (string): The job token returned by `convertTextToSpeech`.
-
-**Returns:**
-- `success` (boolean)
-- `status` (string): `"pending"`, `"complete_success"`, or `"failed"`
-- `audioUrl` (string|null): The audio file path or URL (when ready).
-
-**Example (Client-side):**
-```javascript
-const checkConversionStatus = firebase.functions().httpsCallable('checkConversionStatus');
-const result = await checkConversionStatus({ inferenceToken: "..." });
-// result.data: { success: true, status: "...", audioUrl: "..." }
-```
-
----
-
-## How the Functions Work
-
-- `loginFakeYou` authenticates with your FakeYou account and maintains a session.
-- `convertTextToSpeech` starts a new TTS job and returns a job token.
-- `checkConversionStatus` checks the job status and returns the audio URL when ready.
-- Each TTS request uses a unique UUID for idempotency.
-- **Polling:** The client is responsible for polling `checkConversionStatus` until the status is `"complete_success"` and the `audioUrl` is available.
-- **Session Management:** The session is maintained in Firestore and in memory, ensuring it persists between function calls.
-
----
-
-## Authentication Flow
-
-1. Call `loginFakeYou` with your FakeYou account credentials.
-2. Once authenticated, use `convertTextToSpeech` to start TTS jobs.
-3. Use `checkConversionStatus` to monitor job progress.
-4. If you encounter authentication errors, call `loginFakeYou` again to refresh the session.
-
----
-
-## Audio URL Handling
-
-- The `audioUrl` returned may be a **relative path** (e.g. `/media/...wav`).
-- To access the audio, prepend `https://storage.googleapis.com/vocodes-public` to the path:
-  ```
-  https://storage.googleapis.com/vocodes-public/media/...wav
-  ```
-- If you get an XML error about billing, this is an issue on FakeYou's side, not your code.
-
----
-
-## Status Values
-
-- `"pending"`: The job is still processing.
-- `"complete_success"`: The job is finished and the audio is ready.
-- `"failed"`: The job failed (see error details).
-
----
-
-## Polling Example (Client Side)
-
-```javascript
-async function pollForAudio(inferenceToken) {
-  let done = false;
-  while (!done) {
-    const result = await checkConversionStatus({ inferenceToken });
-    if (result.data.status === 'complete_success' && result.data.audioUrl) {
-      // Play or download audio
-      done = true;
-    } else if (result.data.status === 'failed') {
-      // Handle failure
-      done = true;
-    } else {
-      await new Promise(res => setTimeout(res, 3000));
-    }
-  }
-}
-```
-
----
-
-## Complete Usage Example
-
-```javascript
-async function generateSpeech(text, modelToken) {
+  });
+  
   try {
-    // Step 1: Login to FakeYou
-    const loginFakeYou = firebase.functions().httpsCallable('loginFakeYou');
-    const loginResult = await loginFakeYou({
-      username: "your_fakeyou_email@example.com",
-      password: "your_password"
-    });
-    
-    if (!loginResult.data.success) {
-      throw new Error("Login failed");
-    }
-    
-    // Step 2: Start TTS job
-    const convertTextToSpeech = firebase.functions().httpsCallable('convertTextToSpeech');
-    const conversionResult = await convertTextToSpeech({
-      text: text,
-      modelName: modelToken
-    });
-    
-    if (!conversionResult.data.success) {
-      throw new Error("Failed to start TTS job");
-    }
-    
-    // Step 3: Poll for completion
-    const inferenceToken = conversionResult.data.inferenceToken;
-    return await pollForAudio(inferenceToken);
+    // Generate speech and save to file
+    await tts.sayToFile(
+      "Mario", // Voice name to search for
+      "It's a me, Mario!", // Text to speak
+      "./mario_speech.wav" // Output file
+    );
+    console.log("Audio generated successfully!");
   } catch (error) {
-    console.error("Error:", error);
-    throw error;
+    console.error("Error:", error.message);
   }
 }
 
-async function pollForAudio(inferenceToken) {
-  const checkConversionStatus = firebase.functions().httpsCallable('checkConversionStatus');
-  
-  let attempts = 0;
-  const maxAttempts = 20; // Prevent infinite loops
-  
-  while (attempts < maxAttempts) {
-    const result = await checkConversionStatus({ inferenceToken });
-    
-    if (result.data.status === 'complete_success' && result.data.audioUrl) {
-      // Format the full audio URL
-      const fullAudioUrl = `https://storage.googleapis.com/vocodes-public${result.data.audioUrl}`;
-      return fullAudioUrl;
-    } else if (result.data.status === 'failed') {
-      throw new Error("TTS conversion failed");
-    }
-    
-    // Wait before next poll
-    await new Promise(res => setTimeout(res, 3000));
-    attempts++;
-  }
-  
-  throw new Error("TTS conversion timed out");
+quickDemo();
+```
+
+## API Reference
+
+### Constructor
+
+```javascript
+const tts = new FakeYouTTS({
+  username: "your_username", // FakeYou credentials
+  password: "your_password",
+  retries: 3,               // Number of retries for failed API calls
+  retryDelay: 1000,         // Milliseconds between retries
+  timeout: 30000,           // Timeout for operations
+  cacheDir: "./cache"       // Directory for caching
+});
+```
+
+### Methods
+
+#### `login(username, password)`
+
+Authenticate with FakeYou API.
+
+```javascript
+await tts.login("your_username", "your_password");
+```
+
+#### `findModels(searchTerm)`
+
+Search for voice models matching the search term.
+
+```javascript
+const models = await tts.findModels("Homer Simpson");
+console.log(`Found ${models.length} models`);
+```
+
+#### `getModel(modelToken)`
+
+Get a specific model by its token ID.
+
+```javascript
+const model = await tts.getModel("weight_2c7vq4s9n7x8t9nf11k6ssb93");
+```
+
+#### `findModelByName(name)`
+
+Find a model by name (uses partial matching).
+
+```javascript
+const model = await tts.findModelByName("Mario");
+if (model) {
+  console.log(`Found model: ${model.title} (${model.token})`);
 }
 ```
 
----
+#### `generateTTS(model, text)`
+
+Generate TTS using a model and text.
+
+```javascript
+const model = await tts.findModelByName("Mario");
+const inference = await tts.generateTTS(model, "It's a me, Mario!");
+```
+
+#### `getAudioUrl(inference)`
+
+Get the CDN URL for an inference result.
+
+```javascript
+const url = tts.getAudioUrl(inference);
+console.log(`Audio URL: ${url}`);
+```
+
+#### `downloadTTS(inference, outputPath)`
+
+Download TTS result to a file.
+
+```javascript
+await tts.downloadTTS(inference, "./output.wav");
+```
+
+#### `sayToFile(modelNameOrToken, text, outputPath)`
+
+Generate and download TTS in one step.
+
+```javascript
+// Can use model name
+await tts.sayToFile("Mario", "Hello world!", "./mario_hello.wav");
+
+// Or model token
+await tts.sayToFile("weight_2c7vq4s9n7x8t9nf11k6ssb93", "Hello world!", "./mario_hello.wav");
+```
 
 ## Error Handling
 
-The functions will throw errors in the following cases:
-- Missing required parameters
-- Invalid credentials
-- Session expiry
-- API request failures
-- Network errors
+All methods that make API calls can throw errors. It's recommended to use try-catch blocks:
 
-**Handle these errors appropriately in your client application.**
+```javascript
+try {
+  await tts.sayToFile("Mario", "Hello world!", "./output.wav");
+} catch (error) {
+  console.error("TTS generation failed:", error.message);
+  
+  // Check last error for details
+  if (tts.lastError) {
+    console.error("Detailed error:", tts.lastError);
+  }
+}
+```
 
----
+## CDN URL Changes
 
-## Troubleshooting & FAQ
+As of November 2024, FakeYou moved from Google Storage to their own CDN. This wrapper automatically handles this change by:
 
-**Q: I get an XML error about billing when accessing the audio URL.**  
-A: This is a FakeYou server-side issue (their Google Cloud billing is disabled). Wait for them to resolve it.
+1. Checking for the `publicBucketWavAudioPath` property
+2. Using the new CDN URL format: `https://cdn-2.fakeyou.com/media/...`
+3. Providing a fallback for older API responses
 
-**Q: How do I get a model token?**  
-A: Use the FakeYou website, select a voice, and inspect the network request payload for `tts_model_token`.
+## Examples
 
-**Q: How often do I need to login?**  
-A: Login sessions typically last for several hours. If you encounter authentication errors, simply call `loginFakeYou` again.
+### Find and List Available Models
 
-**Q: Can I use this with any client?**  
-A: Yes! Any client that can call Firebase Functions can use this API.
+```javascript
+const FakeYouTTS = require('./index.js');
 
----
+async function listModels() {
+  const tts = new FakeYouTTS({
+    username: "your_username",
+    password: "your_password"
+  });
+  
+  await tts.login();
+  
+  // Search for a specific character
+  const models = await tts.findModels("mario");
+  
+  // Print the first 5 results
+  models.slice(0, 5).forEach((model, i) => {
+    console.log(`[${i}] ${model.title} | ${model.token}`);
+  });
+}
 
-## Contact
+listModels();
+```
 
-For questions about this integration, please contact the developer or open an issue. 
+### Generate Speech from Multiple Voices
+
+```javascript
+const FakeYouTTS = require('./index.js');
+
+async function multiVoiceDemo() {
+  const tts = new FakeYouTTS({
+    username: "your_username",
+    password: "your_password"
+  });
+  
+  // Create an output directory
+  const fs = require('fs');
+  if (!fs.existsSync('./voices')) {
+    fs.mkdirSync('./voices');
+  }
+  
+  // Generate speech with different voices
+  const voices = ["Mario", "Homer Simpson", "Donald Trump"];
+  const text = "Welcome to my demonstration!";
+  
+  for (const voice of voices) {
+    try {
+      console.log(`Generating speech for ${voice}...`);
+      await tts.sayToFile(
+        voice,
+        text,
+        `./voices/${voice.replace(/\s+/g, '_').toLowerCase()}.wav`
+      );
+      console.log(`✓ ${voice} completed`);
+    } catch (error) {
+      console.error(`✗ ${voice} failed: ${error.message}`);
+    }
+  }
+}
+
+multiVoiceDemo();
+```
+
+## License
+
+MIT 
