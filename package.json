@@ -15,8 +15,12 @@
   },
   "dependencies": {
     "axios": "^1.6.2",
+    "fakeyou.js": "^1.1.1",
+    "fakeyou.ts": "^3.6.1",
     "firebase-admin": "^11.11.0",
     "firebase-functions": "^4.5.0",
+    "fs": "^0.0.1-security",
+    "https": "^1.0.0",
     "uuid": "^11.1.0"
   },
   "private": true
