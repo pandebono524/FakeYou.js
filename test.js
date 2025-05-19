@@ -1,134 +1,73 @@
-const axios = require('axios');
-const { v4: uuidv4 } = require('uuid');
+const FakeYou = require("fakeyou.ts").default;
+const fs = require("fs");
+const https = require("https");
 
-// FakeYou API endpoints
-const FAKEYOU_BASE_URL = 'https://api.fakeyou.com';
-const FAKEYOU_LOGIN_URL = `${FAKEYOU_BASE_URL}/login`;
-const FAKEYOU_TTS_URL = `${FAKEYOU_BASE_URL}/tts/inference`;
-const FAKEYOU_JOB_URL = `${FAKEYOU_BASE_URL}/tts/job`;
-
-// Replace these with your actual FakeYou credentials
-const FAKEYOU_USERNAME = 'YOUR_FAKEYOU_USERNAME';
-const FAKEYOU_PASSWORD = 'YOUR_FAKEYOU_PASSWORD';
-
-// Store the session cookie
-let sessionCookie = null;
-
-async function login() {
-    try {
-        console.log('Logging in to FakeYou...');
-        
-        // Prepare the login payload
-        const payload = {
-            username_or_email: FAKEYOU_USERNAME,
-            password: FAKEYOU_PASSWORD
-        };
-
-        // Make the login API call
-        const response = await axios.post(FAKEYOU_LOGIN_URL, payload, {
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            withCredentials: true
+function downloadFile(url, outputPath) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(outputPath);
+    https
+      .get(url, function (response) {
+        response.pipe(file);
+        file.on("finish", function () {
+          file.close(resolve);
+          console.log(`File downloaded to ${outputPath}`);
         });
-
-        // Extract and store the session cookie
-        if (response.headers['set-cookie']) {
-            sessionCookie = response.headers['set-cookie'];
-            console.log('Login successful! Session cookie obtained.');
-            return true;
-        } else {
-            console.error('Failed to obtain session cookie');
-            return false;
-        }
-    } catch (error) {
-        console.error('Login Error:', error.response ? error.response.data : error.message);
-        return false;
-    }
+      })
+      .on("error", function (err) {
+        fs.unlink(outputPath, () => {}); // Delete the file on error
+        reject(err);
+      });
+  });
 }
 
-async function testConvertTextToSpeech() {
-    try {
-        // Make sure we're logged in
-        if (!sessionCookie) {
-            const loginSuccess = await login();
-            if (!loginSuccess) {
-                console.error('Cannot proceed without login');
-                return;
-            }
-        }
+async function main() {
+  const client = new FakeYou();
 
-        // Test data
-        const testData = {
-            text: "Hello, this is a test message",
-            modelName: "weight_7jk8mgwkzsycqrxmfw5q4245y"
-        };
+  try {
+    await client.login({
+      username: "YOUR_FAKEYOU_USERNAME",
+      password: "YOUR_FAKEYOU_PASSWORD",
+    });
+    console.log("Login successful");
+  } catch (error) {
+    console.error("Login failed:", error);
+  }
 
-        // Prepare the request payload
-        const payload = {
-            tts_model_token: testData.modelName,
-            inference_text: testData.text,
-            uuid_idempotency_token: uuidv4()
-        };
+  // Get all models
+  const modelsMap = await client.fetchTtsModels("homer");
+  const modelsArr = Array.from(modelsMap.values());
+  console.log(`Found ${modelsArr.length} models`);
 
-        console.log('Sending request to FakeYou API...');
-        
-        // Make the API call
-        const response = await axios.post(FAKEYOU_TTS_URL, payload, {
-            headers: {
-                'Content-Type': 'application/json',
-                'Cookie': sessionCookie
-            },
-            withCredentials: true
-        });
+  // Find a popular model
+  const popularModel = modelsArr.find(
+    (m) =>
+      m.title &&
+      (m.title.toLowerCase().includes("mario") ||
+        m.title.toLowerCase().includes("trump") ||
+        m.title.toLowerCase().includes("morgan freeman"))
+  );
 
-        console.log('Response:', response.data);
+  const model = popularModel || modelsArr[0];
+  console.log("Using model:", model.title, model.token);
 
-        if (response.data.success) {
-            const inferenceToken = response.data.inference_job_token;
-            console.log('Inference Token:', inferenceToken);
-            
-            // Poll for status
-            await pollUntilComplete(inferenceToken);
-        }
+  try {
+    console.log("Starting TTS generation...");
+    const inference = await model.infer("Hello, this is a test message!");
 
-    } catch (error) {
-        console.error('Error:', error.response ? error.response.data : error.message);
+    // Save to disk
+    console.log("Saving audio to disk...");
+
+    // Create the correct CDN URL using the path
+    if (inference.publicBucketWavAudioPath) {
+      const cdnUrl = `https://cdn-2.fakeyou.com${inference.publicBucketWavAudioPath}`;
+      console.log("New CDN URL:", cdnUrl);
+      await downloadFile(cdnUrl, "./downloaded_audio.wav");
+    } else {
+      console.log("Original resourceUrl:", inference.resourceUrl);
     }
+  } catch (error) {
+    console.error("TTS generation failed:", error);
+  }
 }
 
-async function pollUntilComplete(inferenceToken) {
-    const pollInterval = 3000; // 3 seconds
-    let isComplete = false;
-    while (!isComplete) {
-        try {
-            console.log('\nChecking conversion status...');
-            const response = await axios.get(`${FAKEYOU_JOB_URL}/${inferenceToken}`, {
-                headers: {
-                    'Cookie': sessionCookie
-                },
-                withCredentials: true
-            });
-            const data = response.data;
-            console.log('Status Response:', data);
-            if (data.success && data.state.status === 'complete_success' && data.state.maybe_public_bucket_wav_audio_path) {
-                console.log('\n✅ Conversion complete! Audio URL:');
-                console.log(data.state.maybe_public_bucket_wav_audio_path);
-                isComplete = true;
-            } else if (data.success && data.state.status === 'failed') {
-                console.error('\n❌ Conversion failed.');
-                isComplete = true;
-            } else {
-                // Wait and poll again
-                await new Promise(res => setTimeout(res, pollInterval));
-            }
-        } catch (error) {
-            console.error('Error:', error.response ? error.response.data : error.message);
-            // Wait and try again
-            await new Promise(res => setTimeout(res, pollInterval));
-        }
-    }
-}
-
-// Run the test
-testConvertTextToSpeech(); 
+main();
